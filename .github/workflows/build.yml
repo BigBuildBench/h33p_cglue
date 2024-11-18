@@ -1,0 +1,276 @@
+name: Build and test
+
+on: [push, pull_request]
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_GIT_FETCH_WITH_CLI: true
+
+jobs:
+
+  build-base:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        toolchain: ["1.45.0", "stable"]
+        include:
+          - os: macos-14
+            toolchain: "stable"
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          override: true
+
+      - name: Build without examples
+        run: |
+          cd cglue
+          cargo build --verbose
+
+  build-extra-features:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [macos-14, ubuntu-latest, windows-latest]
+        # 1.57 is needed for const panic
+        # panic in const is used to verify waker layouts
+        toolchain: ["1.57.0", "stable"]
+        features: [
+          "--features task",
+          "--features layout_checks"
+        ]
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          override: true
+
+      - name: Build without examples
+        run: |
+          cd cglue
+          cargo build --verbose ${{ matrix.features }}
+
+  build-with-layouts:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        toolchain: ["1.46.0", "stable"]
+        include:
+          - os: macos-14
+            toolchain: "stable"
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          override: true
+
+      - name: Build
+        run: cargo build --workspace --verbose
+
+      - name: Build examples
+        run: cargo build --workspace --examples --verbose
+
+  build-nightly:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [macos-14, ubuntu-latest, windows-latest]
+        toolchain: ["1.57.0", "stable", "nightly-2021-11-05"]
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          override: true
+
+      - name: Build
+        run: cargo build --workspace --all-features --verbose
+        env:
+          RUSTC_BOOTSTRAP: try_default
+
+      - name: Build examples
+        run: cargo build --workspace --all-features --examples --verbose
+        env:
+          RUSTC_BOOTSTRAP: try_default
+
+  build-cross-aarch64:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        toolchain: ["1.45.0", "stable"]
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          target: aarch64-unknown-linux-gnu
+          override: true
+      - uses: actions-rs/cargo@v1
+        with:
+          use-cross: true
+          command: build
+          args: --target aarch64-unknown-linux-gnu --verbose -p cglue
+
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        toolchain: ["1.45.0", "stable"]
+        include:
+          - os: macos-14
+            toolchain: "stable"
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          override: true
+
+      - name: Run all tests
+        run: cargo test --verbose -p cglue
+
+  test-all-features:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [macos-14, ubuntu-latest, windows-latest]
+        toolchain: ["1.57.0", "stable", "nightly-2021-11-05"]
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          override: true
+
+      - name: Run all tests
+        run: cargo test --workspace --all-features --verbose
+        env:
+          RUSTC_BOOTSTRAP: try_default
+
+  lint:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        features: ["--all-features", "", "-p cglue --features task", "-p cglue --features task"]
+    steps:
+      - uses: actions/checkout@v2
+      - run: rustup component add clippy
+      - name: Check formatting
+        run: cargo fmt -- --check
+      - uses: actions-rs/clippy-check@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          args: --all-targets ${{ matrix.features }}
+        env:
+          RUSTC_BOOTSTRAP: try_default
+
+  patched-miri:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        toolchain: ["nightly-2021-11-05"]
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          override: true
+      - run: rustup component add miri
+      - name: Patch out a part of miri to allow type erasure
+        run: |
+          cargo install --git https://github.com/h33p/miri-rustabi-patcher.git
+          miri-rustabi-patcher ~/.rustup/toolchains/${{ matrix.toolchain }}-x86_64-unknown-linux-gnu/bin/miri
+          mv ~/.rustup/toolchains/${{ matrix.toolchain }}-x86_64-unknown-linux-gnu/bin/miri.patched ~/.rustup/toolchains/${{ matrix.toolchain }}-x86_64-unknown-linux-gnu/bin/miri
+          chmod +x ~/.rustup/toolchains/${{ matrix.toolchain }}-x86_64-unknown-linux-gnu/bin/miri
+      - name: Run miri
+        run: |
+          cd cglue
+          MIRIFLAGS="-Zmiri-disable-stacked-borrows" cargo miri test --features rust_void
+
+  c-examples:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        toolchain: ["1.46.0", "stable"]
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          override: true
+      - name: Install nightly for expansion
+        run: rustup toolchain install nightly
+      - name: Install cbindgen
+        run: cargo +nightly install cbindgen
+      - name: Set up GCC
+        uses: egor-tensin/setup-gcc@v1
+        with:
+          version: latest
+          platform: x64
+      - name: Build the plugins
+        run: cargo build --release -p plugin-api -p plugin-lib -p cglue-bindgen
+      - name: Build C++ plugin library
+        run: |
+          cd examples/cpp-plugin-lib/
+          make
+      - name: Build and test C binary
+        run: |
+          cd examples/c-user-bin/
+          make
+          ./main.out << EOF
+          plugin_lib
+          asdf
+          23
+          asd
+          24
+          EOF
+      - name: Build and test C prefix binary
+        run: |
+          cd examples/c-user-prefixed-bin/
+          make
+          ./main.out << EOF
+          plugin_lib
+          asdf
+          23
+          asd
+          24
+          EOF
+      - name: Build and test C++ binary
+        run: |
+          cd examples/cpp-user-bin/
+          make
+          ./main.out << EOF
+          plugin_lib
+          asdf
+          23
+          asd
+          24
+          EOF
+      - name: Build and test C binary against C++ library
+        run: |
+          cd examples/c-user-bin/
+          make
+          ./main.out << EOF
+          plugin_cpp
+          asdf
+          23
+          asd
+          24
+          EOF
+      - name: Build and test C++ binary against C++ library
+        run: |
+          cd examples/cpp-user-bin/
+          make
+          ./main.out << EOF
+          plugin_cpp
+          asdf
+          23
+          asd
+          24
+          EOF

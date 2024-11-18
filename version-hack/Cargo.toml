@@ -1,0 +1,10 @@
+[package]
+name = "version-hack"
+version = "0.1.0"
+edition = "2018"
+
+# Need to uncomment these before cargo update to keep hashbrown on rust 2018 edition
+[dependencies]
+
+[dev-dependencies]
+pollster = "=0.2.0"
